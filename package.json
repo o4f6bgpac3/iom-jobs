@@ -1,0 +1,25 @@
+{
+  "name": "iom-job-scraper",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -n api,app -c blue,green \"npm run dev:api\" \"npm run dev:app\"",
+    "dev:api": "cd worker && npx wrangler dev --port 8787",
+    "dev:app": "npx serve app -l 3005",
+    "dev:remote": "concurrently -n api,app -c blue,green \"npm run dev:api:remote\" \"npm run dev:app\"",
+    "dev:api:remote": "cd worker && npx wrangler dev --remote --port 8787",
+    "scrape": "node scripts/scrape.js",
+    "scrape:full": "node scripts/scrape.js full",
+    "scrape:remote": "node scripts/scrape.js --remote",
+    "scrape:full:remote": "node scripts/scrape.js full --remote",
+    "db": "cd worker && npx wrangler d1 execute iom-jobs --local",
+    "db:remote": "cd worker && npx wrangler d1 execute iom-jobs --remote",
+    "deploy": "cd worker && npx wrangler deploy",
+    "deploy:app": "npx wrangler pages deploy app --project-name=iom-jobs",
+    "deploy:all": "npm run deploy && npm run deploy:app"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0",
+    "serve": "^14.2.0"
+  }
+}

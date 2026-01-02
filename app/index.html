@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <!-- FORK: Update canonical URL, og:url, and JSON-LD URLs with your domain -->
+
+    <!-- Primary Meta Tags -->
+    <title>IOM Jobs - Isle of Man Job Vacancies</title>
+    <meta name="description" content="Browse current job vacancies in the Isle of Man. Search by category, employer, salary and more. Updated daily.">
+    <link rel="canonical" href="https://jobs.balley.xyz/">
+
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://jobs.balley.xyz/">
+    <meta property="og:title" content="IOM Jobs - Isle of Man Job Vacancies">
+    <meta property="og:description" content="Browse current job vacancies in the Isle of Man. Search by category, employer, salary and more.">
+    <meta property="og:site_name" content="IOM Jobs">
+
+    <!-- Twitter -->
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="IOM Jobs - Isle of Man Job Vacancies">
+    <meta name="twitter:description" content="Browse current job vacancies in the Isle of Man. Updated daily.">
+
+    <!-- JSON-LD Structured Data -->
+    <script type="application/ld+json">
+    {
+        "@context": "https://schema.org",
+        "@type": "WebSite",
+        "name": "IOM Jobs",
+        "url": "https://jobs.balley.xyz/",
+        "description": "Isle of Man job vacancies aggregator",
+        "potentialAction": {
+            "@type": "SearchAction",
+            "target": "https://jobs.balley.xyz/?search={search_term}",
+            "query-input": "required name=search_term"
+        }
+    }
+    </script>
+
+    <link rel="stylesheet" href="styles.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💼</text></svg>">
+</head>
+<body>
+<div class="container">
+    <header>
+        <div class="header-content">
+            <h1>Isle of Man Jobs</h1>
+        </div>
+        <div id="ask-container"></div>
+    </header>
+
+    <main>
+        <div id="filter-panel" class="filter-panel">
+            <!-- Filters will be rendered here -->
+        </div>
+
+        <div id="stats-container" class="stats-container">
+            <!-- Stats will be rendered here -->
+        </div>
+
+        <div id="loading" class="loading" hidden>
+            <div class="spinner"></div>
+            <p>Loading jobs...</p>
+        </div>
+
+        <div id="error-message" class="error-message" hidden></div>
+
+        <div id="jobs-container" class="job-list">
+            <!-- Job cards will be rendered here -->
+        </div>
+
+        <div id="pagination-container" class="pagination-container">
+            <!-- Pagination will be rendered here -->
+        </div>
+    </main>
+
+    <footer>
+        <p>Data sourced from <a href="https://services.gov.im/job-search/" target="_blank" rel="noopener">Isle of Man Government Job Centre</a></p>
+        <p id="last-updated" class="footer-note">Loading update time...</p>
+    </footer>
+</div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,5 @@
+# FORK: Update the Sitemap URL with your Worker URL
+User-agent: *
+Allow: /
+
+Sitemap: https://iom-job-scraper.r4qavgnsae.workers.dev/sitemap.xml

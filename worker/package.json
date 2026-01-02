@@ -1,0 +1,21 @@
+{
+  "name": "iom-job-scraper-worker",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker for IOM Government job scraper",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:init": "wrangler d1 execute iom-jobs --file=./database.sql",
+    "db:init:local": "wrangler d1 execute iom-jobs --local --file=./database.sql",
+    "scrape": "node scrape-local.js",
+    "scrape:full": "node scrape-local.js --full"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.5.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

@@ -1,0 +1,26 @@
+# Local Development Environment Variables
+#
+# Copy this file to .dev.vars and fill in your values.
+# This file is used by `wrangler dev` for local development.
+# Never commit .dev.vars to version control!
+
+# Required: API key for LLM service (default: Venice.ai)
+# Get one at: https://venice.ai/
+LLM_API_KEY=your_api_key_here
+
+# Required: Admin API key for /scrape endpoint
+# Generate a secure random string
+ADMIN_API_KEY=your_admin_api_key_here
+
+# Optional: LLM Configuration
+# These allow you to use a different LLM provider or model.
+# Note: Only Venice.ai has been tested. Other OpenAI-compatible APIs should work but are unverified.
+# LLM_API_URL=https://api.venice.ai/api/v1/chat/completions
+# LLM_MODEL=llama-3.3-70b
+# LLM_TIMEOUT_MS=15000
+# LLM_MAX_RETRIES=1
+
+# Optional: Email notification settings (for scrape failure alerts)
+# SMTP2GO_API_KEY=your_smtp2go_api_key_here
+# NOTIFICATION_EMAIL_TO=your-email@example.com
+# NOTIFICATION_EMAIL_FROM=noreply@your-domain.com
