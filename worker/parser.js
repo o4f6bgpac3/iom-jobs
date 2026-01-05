@@ -1,7 +1,7 @@
 // HTML Parser for IOM Government Job Search
 // Extracts job listings from the search results page
 
-import { cleanText, parseDate, parseSalaryRange, generateJobGuid } from "./utils.js";
+import { cleanText, parseDate, generateJobGuid } from "./utils.js";
 
 /**
  * Extract jobtrain.co.uk URL from description text
@@ -178,53 +178,76 @@ function cleanHtmlDescription(html) {
 
 /**
  * Parse job listings from the search results HTML
+ * The gov.im page groups jobs by classification with <h2> headers:
+ *   <h2 id=Header_xxx>Classification Name</h2>
+ *   <table>
+ *     <tr><td>ID</td><td><a href="viewjob?Id=...">Title</a></td><td>Employer</td><td>Hours</td></tr>
+ *   </table>
  * @param {string} html - The HTML content of the search results page
- * @returns {Array} Array of parsed job objects
+ * @returns {Array} Array of parsed job objects with classification, employer, hours
  */
 export function parseJobListings(html) {
     const jobs = [];
 
-    // Find job listing containers
-    // Common patterns: .job-result, .vacancy, .listing-item, etc.
-    // We'll try multiple patterns and use what works
-
-    // Pattern 1: Look for job result divs/articles
-    const jobPatterns = [
-        /<article[^>]*class="[^"]*job[^"]*"[^>]*>([\s\S]*?)<\/article>/gi,
-        /<div[^>]*class="[^"]*job-result[^"]*"[^>]*>([\s\S]*?)<\/div>\s*(?=<div[^>]*class="[^"]*job-result|$)/gi,
-        /<div[^>]*class="[^"]*vacancy[^"]*"[^>]*>([\s\S]*?)<\/div>\s*(?=<div[^>]*class="[^"]*vacancy|$)/gi,
-        /<li[^>]*class="[^"]*job[^"]*"[^>]*>([\s\S]*?)<\/li>/gi,
-        /<tr[^>]*class="[^"]*job[^"]*"[^>]*>([\s\S]*?)<\/tr>/gi,
-    ];
-
-    let matches = [];
-
-    for (const pattern of jobPatterns) {
-        const found = [...html.matchAll(pattern)];
-        if (found.length > 0) {
-            matches = found;
-            console.log(`Found ${found.length} job listings using pattern`);
-            break;
-        }
+    // Try the efficient grouped format first (h2 headers + tables)
+    const groupedJobs = parseGroupedJobListings(html);
+    if (groupedJobs.length > 0) {
+        console.log(`Found ${groupedJobs.length} jobs using grouped format`);
+        return groupedJobs;
     }
 
-    // If no specific job container found, try to find links to job details
-    if (matches.length === 0) {
-        console.log("No job containers found, attempting to find job links...");
-        const linkMatches = parseJobLinks(html);
-        return linkMatches;
-    }
+    // Fallback: find job links directly
+    console.log("No grouped format found, falling back to link parsing...");
+    return parseJobLinks(html);
+}
 
-    // Parse each job listing
-    for (const match of matches) {
-        try {
-            const jobHtml = match[1] || match[0];
-            const job = parseJobFromHtml(jobHtml);
-            if (job && job.title && job.source_url) {
-                jobs.push(job);
+/**
+ * Parse jobs grouped by classification headers
+ * Extracts classification from <h2> headers and job details from tables
+ */
+function parseGroupedJobListings(html) {
+    const jobs = [];
+
+    // Pattern to find classification headers: <h2 id=Header_xxx>Classification Name</h2>
+    // Followed by a table with job rows
+    const sectionPattern = /<h2[^>]*id=Header_[^>]*>([^<]+)<\/h2>[\s\S]*?<table[^>]*class="table"[^>]*>([\s\S]*?)<\/table>/gi;
+
+    let sectionMatch;
+    while ((sectionMatch = sectionPattern.exec(html)) !== null) {
+        const classification = cleanText(sectionMatch[1]);
+        const tableHtml = sectionMatch[2];
+
+        // Parse job rows from this table
+        // Skip header row, find data rows with viewjob links
+        const rowPattern = /<tr>[\s\S]*?<td>(\d+)<\/td>[\s\S]*?<a[^>]*href="([^"]*viewjob[^"]*)"[^>]*>([^<]+)<\/a>[\s\S]*?<td>([^<]*)<\/td>[\s\S]*?<td>([^<]*)<\/td>[\s\S]*?<\/tr>/gi;
+
+        let rowMatch;
+        while ((rowMatch = rowPattern.exec(tableHtml)) !== null) {
+            const jobId = rowMatch[1];
+            const url = rowMatch[2];
+            const title = cleanText(rowMatch[3]);
+            const employer = cleanText(rowMatch[4]);
+            const hours = cleanText(rowMatch[5]);
+
+            // Determine hours_type from hours text
+            let hoursType = null;
+            const hoursLower = hours.toLowerCase();
+            if (hoursLower.includes("full time") || hoursLower.includes("full-time")) {
+                hoursType = "full-time";
+            } else if (hoursLower.includes("part time") || hoursLower.includes("part-time")) {
+                hoursType = "part-time";
             }
-        } catch (error) {
-            console.error("Error parsing job listing:", error.message);
+
+            jobs.push({
+                title,
+                employer: employer || null,
+                classification,
+                hours_option: hours || null,
+                hours_type: hoursType,
+                source_url: normalizeUrl(url),
+                guid: generateJobGuid(url),
+                scraped_at: new Date().toISOString(),
+            });
         }
     }
 
@@ -273,173 +296,6 @@ function parseJobLinks(html) {
     }
 
     return jobs;
-}
-
-/**
- * Parse individual job data from HTML snippet
- */
-function parseJobFromHtml(html) {
-    const job = {
-        title: null,
-        employer: null,
-        location: null,
-        salary_text: null,
-        salary_min: null,
-        salary_max: null,
-        salary_type: null,
-        job_type: null,
-        classification: null,
-        posted_date: null,
-        closing_date: null,
-        summary: null,
-        source_url: null,
-        guid: null,
-        scraped_at: new Date().toISOString(),
-    };
-
-    // Extract title (usually in h2, h3, or a strong link)
-    const titlePatterns = [
-        /<h[1-4][^>]*>\s*<a[^>]*href=["']([^"']+)["'][^>]*>([^<]+)<\/a>/i,
-        /<a[^>]*class="[^"]*title[^"]*"[^>]*href=["']([^"']+)["'][^>]*>([^<]+)<\/a>/i,
-        /<a[^>]*href=["']([^"']+)["'][^>]*class="[^"]*title[^"]*"[^>]*>([^<]+)<\/a>/i,
-        /<h[1-4][^>]*>([^<]+)<\/h[1-4]>/i,
-        /<strong[^>]*>\s*<a[^>]*href=["']([^"']+)["'][^>]*>([^<]+)<\/a>/i,
-    ];
-
-    for (const pattern of titlePatterns) {
-        const match = html.match(pattern);
-        if (match) {
-            if (match[2]) {
-                job.title = cleanText(match[2]);
-                job.source_url = normalizeUrl(match[1]);
-            } else {
-                job.title = cleanText(match[1]);
-            }
-            break;
-        }
-    }
-
-    // If no URL found in title, look for any job detail link
-    if (!job.source_url) {
-        const urlMatch = html.match(/<a[^>]*href=["']([^"']*(?:job|vacancy|details|view)[^"']*)["']/i);
-        if (urlMatch) {
-            job.source_url = normalizeUrl(urlMatch[1]);
-        }
-    }
-
-    // Extract employer/department
-    const employerPatterns = [
-        /(?:employer|department|organisation|company)[:\s]*<[^>]*>([^<]+)</i,
-        /<[^>]*class="[^"]*(?:employer|company|dept)[^"]*"[^>]*>([^<]+)</i,
-        /(?:employer|department|organisation)[:\s]*([^<\n]+)/i,
-    ];
-
-    for (const pattern of employerPatterns) {
-        const match = html.match(pattern);
-        if (match) {
-            job.employer = cleanText(match[1]);
-            break;
-        }
-    }
-
-    // Extract location
-    const locationPatterns = [
-        /(?:location|based at|work location)[:\s]*<[^>]*>([^<]+)</i,
-        /<[^>]*class="[^"]*location[^"]*"[^>]*>([^<]+)</i,
-        /(?:location|based)[:\s]*([^<\n,]+)/i,
-    ];
-
-    for (const pattern of locationPatterns) {
-        const match = html.match(pattern);
-        if (match) {
-            job.location = cleanText(match[1]);
-            break;
-        }
-    }
-
-    // Extract salary
-    const salaryPatterns = [
-        /(?:salary|pay|wage|compensation)[:\s]*<[^>]*>([^<]+)</i,
-        /<[^>]*class="[^"]*salary[^"]*"[^>]*>([^<]+)</i,
-        /(£[\d,]+(?:\s*[-–]\s*£[\d,]+)?(?:\s*(?:per|p\.a\.|pa|annually|per annum))?)/i,
-        /(?:salary|pay)[:\s]*([\d,]+\s*[-–]\s*[\d,]+)/i,
-    ];
-
-    for (const pattern of salaryPatterns) {
-        const match = html.match(pattern);
-        if (match) {
-            job.salary_text = cleanText(match[1]);
-            const parsed = parseSalaryRange(job.salary_text);
-            job.salary_min = parsed.min;
-            job.salary_max = parsed.max;
-            job.salary_type = parsed.type;
-            break;
-        }
-    }
-
-    // Extract job type
-    const jobTypePatterns = [
-        /(?:job type|contract|employment type)[:\s]*<[^>]*>([^<]+)</i,
-        /<[^>]*class="[^"]*(?:job-type|contract)[^"]*"[^>]*>([^<]+)</i,
-        /(full[- ]?time|part[- ]?time|permanent|temporary|fixed[- ]?term|contract)/i,
-    ];
-
-    for (const pattern of jobTypePatterns) {
-        const match = html.match(pattern);
-        if (match) {
-            job.job_type = cleanText(match[1]).toLowerCase();
-            break;
-        }
-    }
-
-    // Extract closing date
-    const closingPatterns = [
-        /(?:closing|deadline|closes|apply by)[:\s]*<[^>]*>([^<]+)</i,
-        /<[^>]*class="[^"]*(?:closing|deadline)[^"]*"[^>]*>([^<]+)</i,
-        /(?:closing|closes|deadline)[:\s]*([^\n<]+)/i,
-    ];
-
-    for (const pattern of closingPatterns) {
-        const match = html.match(pattern);
-        if (match) {
-            job.closing_date = parseDate(match[1]);
-            break;
-        }
-    }
-
-    // Extract posted date
-    const postedPatterns = [
-        /(?:posted|published|date added)[:\s]*<[^>]*>([^<]+)</i,
-        /<[^>]*class="[^"]*(?:posted|published)[^"]*"[^>]*>([^<]+)</i,
-        /(?:posted|published)[:\s]*([^\n<]+)/i,
-    ];
-
-    for (const pattern of postedPatterns) {
-        const match = html.match(pattern);
-        if (match) {
-            job.posted_date = parseDate(match[1]);
-            break;
-        }
-    }
-
-    // Extract summary/description
-    const summaryPatterns = [
-        /<[^>]*class="[^"]*(?:summary|description|intro)[^"]*"[^>]*>([\s\S]*?)<\/[^>]+>/i,
-        /<p[^>]*>([\s\S]{50,500}?)<\/p>/i,
-    ];
-
-    for (const pattern of summaryPatterns) {
-        const match = html.match(pattern);
-        if (match) {
-            job.summary = cleanText(match[1]).substring(0, 500);
-            break;
-        }
-    }
-
-    // Generate GUID
-    job.guid = generateJobGuid(job.source_url || job.title);
-
-    return job;
 }
 
 /**

@@ -73,7 +73,8 @@ CREATE TABLE IF NOT EXISTS scrape_log (
     jobs_inserted INTEGER DEFAULT 0,
     jobs_updated INTEGER DEFAULT 0,
     status TEXT DEFAULT 'running',
-    error_message TEXT
+    error_message TEXT,
+    sample_html TEXT  -- First HTML response for debugging
 );
 
 -- Primary query indexes

@@ -259,6 +259,104 @@ async function handleJobDetailRequest(request, env, jobId) {
 }
 
 /**
+ * Handle health endpoint for external monitoring
+ * Returns health status based on recent scrape/enrichment activity
+ */
+async function handleHealthRequest(env) {
+    try {
+        // Get recent scrape logs (last 7 days)
+        const recentLogs = await env.DB.prepare(`
+            SELECT id, started_at, completed_at, url_type, jobs_found, jobs_inserted,
+                   status, error_message
+            FROM scrape_log
+            WHERE started_at > datetime('now', '-7 days')
+            ORDER BY started_at DESC
+            LIMIT 20
+        `).all();
+
+        const logs = recentLogs.results || [];
+
+        // Separate scrape and enrichment logs
+        const scrapeLogs = logs.filter(l => l.url_type !== "enrichment");
+        const enrichmentLogs = logs.filter(l => l.url_type === "enrichment");
+
+        // Analyze health
+        const lastScrape = scrapeLogs[0] || null;
+        const lastEnrichment = enrichmentLogs[0] || null;
+
+        // Check for issues
+        const issues = [];
+
+        // Issue: No scrapes in last 48 hours
+        if (lastScrape) {
+            const hoursSinceLastScrape = (Date.now() - new Date(lastScrape.started_at + "Z").getTime()) / (1000 * 60 * 60);
+            if (hoursSinceLastScrape > 48) {
+                issues.push(`No scrape in ${Math.round(hoursSinceLastScrape)} hours`);
+            }
+        } else {
+            issues.push("No scrapes found in last 7 days");
+        }
+
+        // Issue: Last scrape failed
+        if (lastScrape && lastScrape.status === "failed") {
+            issues.push(`Last scrape failed: ${lastScrape.error_message || "unknown error"}`);
+        }
+
+        // Issue: Recent scrapes have high failure rate
+        const recentFailedScrapes = scrapeLogs.filter(l => l.status === "failed").length;
+        if (scrapeLogs.length >= 3 && recentFailedScrapes / scrapeLogs.length > 0.5) {
+            issues.push(`High scrape failure rate: ${recentFailedScrapes}/${scrapeLogs.length} failed`);
+        }
+
+        // Issue: Last enrichment failed
+        if (lastEnrichment && lastEnrichment.status === "failed") {
+            issues.push(`Last enrichment failed: ${lastEnrichment.error_message || "unknown error"}`);
+        }
+
+        // Determine overall health
+        const healthy = issues.length === 0;
+        const status = healthy ? "healthy" : "unhealthy";
+
+        return {
+            result: {
+                status,
+                healthy,
+                issues,
+                lastScrape: lastScrape ? {
+                    time: lastScrape.started_at,
+                    type: lastScrape.url_type,
+                    status: lastScrape.status,
+                    jobsFound: lastScrape.jobs_found,
+                    error: lastScrape.error_message,
+                } : null,
+                lastEnrichment: lastEnrichment ? {
+                    time: lastEnrichment.started_at,
+                    status: lastEnrichment.status,
+                    jobsEnriched: lastEnrichment.jobs_inserted,
+                    error: lastEnrichment.error_message,
+                } : null,
+                recentActivity: {
+                    scrapes: scrapeLogs.length,
+                    scrapesFailed: recentFailedScrapes,
+                    enrichments: enrichmentLogs.length,
+                },
+            },
+            status: healthy ? 200 : 503,
+        };
+    } catch (error) {
+        console.error("Health check error:", error);
+        return {
+            result: {
+                status: "error",
+                healthy: false,
+                issues: [`Health check failed: ${error.message}`],
+            },
+            status: 500,
+        };
+    }
+}
+
+/**
  * Handle stats endpoint (with KV caching)
  */
 async function handleStatsRequest(env) {
@@ -486,6 +584,8 @@ export default {
                 response = await handleJobDetailRequest(request, env, parseInt(jobId, 10));
             } else if (url.pathname === "/stats" && request.method === "GET") {
                 response = await handleStatsRequest(env);
+            } else if (url.pathname === "/health" && request.method === "GET") {
+                response = await handleHealthRequest(env);
             } else if (url.pathname === "/scrape" && request.method === "POST") {
                 response = await handleScrapeRequest(request, env);
             } else if (url.pathname === "/enrich" && request.method === "POST") {
@@ -527,16 +627,30 @@ export default {
     },
 
     /**
-     * Scheduled handler for daily scraping
+     * Scheduled handler for daily scraping and enrichment
+     * - 06:00 UTC: Main scrape (listing pages)
+     * - 06:30 UTC: Enrichment (detail pages)
      */
     async scheduled(event, env, ctx) {
-        console.log("Scheduled scrape triggered at:", new Date().toISOString());
+        const isEnrichmentTrigger = event.cron === "30 6 * * *";
 
-        try {
-            const result = await scrapeJobs(env, false);
-            console.log("Scheduled scrape result:", result);
-        } catch (error) {
-            console.error("Scheduled scrape failed:", error);
+        if (isEnrichmentTrigger) {
+            console.log("Scheduled enrichment triggered at:", new Date().toISOString());
+            try {
+                const { enrichJobDetailsOnly } = await import("./scraper.js");
+                const result = await enrichJobDetailsOnly(env);
+                console.log("Scheduled enrichment result:", result);
+            } catch (error) {
+                console.error("Scheduled enrichment failed:", error);
+            }
+        } else {
+            console.log("Scheduled scrape triggered at:", new Date().toISOString());
+            try {
+                const result = await scrapeJobs(env, false);
+                console.log("Scheduled scrape result:", result);
+            } catch (error) {
+                console.error("Scheduled scrape failed:", error);
+            }
         }
     },
 };
