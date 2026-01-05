@@ -374,6 +374,21 @@ class JobsApp {
         if (this.paginationContainer) {
             this.paginationContainer.innerHTML = "";
         }
+
+        // Update filter results indicator
+        const filterResults = document.getElementById("filter-results");
+        if (!filterResults) return;
+
+        const filteredCount = this.filteredJobs.length;
+        const totalCount = this.allJobs.length;
+        const hasActiveFilters = filteredCount !== totalCount;
+
+        if (hasActiveFilters) {
+            filterResults.textContent = `Showing ${filteredCount} of ${totalCount} jobs`;
+            filterResults.hidden = false;
+        } else {
+            filterResults.hidden = true;
+        }
     }
 
     displayStats(stats) {

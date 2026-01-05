@@ -106,6 +106,7 @@ export function getFilterPanelHTML(filterOptions, currentFilters = {}) {
                 <button type="button" class="btn-clear-filters" id="clear-filters" hidden>Clear</button>
             </div>
         </div>
+        <div id="filter-results" class="filter-results" hidden></div>
     `;
 }
 
