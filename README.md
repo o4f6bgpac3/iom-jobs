@@ -296,7 +296,7 @@ These can be set as secrets to override defaults:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LLM_API_URL` | Venice.ai URL | LLM API endpoint |
-| `LLM_MODEL` | llama-3.3-70b | Model identifier |
+| `LLM_MODEL` | zai-org-glm-4.7 | Model identifier |
 | `LLM_TIMEOUT_MS` | 15000 | Request timeout |
 | `LLM_MAX_RETRIES` | 1 | Retry attempts |
 

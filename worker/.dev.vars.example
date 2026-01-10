@@ -16,7 +16,7 @@ ADMIN_API_KEY=your_admin_api_key_here
 # These allow you to use a different LLM provider or model.
 # Note: Only Venice.ai has been tested. Other OpenAI-compatible APIs should work but are unverified.
 # LLM_API_URL=https://api.venice.ai/api/v1/chat/completions
-# LLM_MODEL=llama-3.3-70b
+# LLM_MODEL=zai-org-glm-4.7
 # LLM_TIMEOUT_MS=15000
 # LLM_MAX_RETRIES=1
 

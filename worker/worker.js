@@ -628,11 +628,11 @@ export default {
 
     /**
      * Scheduled handler for daily scraping and enrichment
-     * - 06:00 UTC: Main scrape (listing pages)
-     * - 06:30 UTC: Enrichment (detail pages)
+     * - 06:00 and 18:00 UTC: Main scrape (listing pages)
+     * - 06:30 and 18:30 UTC: Enrichment (detail pages)
      */
     async scheduled(event, env, ctx) {
-        const isEnrichmentTrigger = event.cron === "30 6 * * *";
+        const isEnrichmentTrigger = event.cron === "30 6,18 * * *";
 
         if (isEnrichmentTrigger) {
             console.log("Scheduled enrichment triggered at:", new Date().toISOString());
