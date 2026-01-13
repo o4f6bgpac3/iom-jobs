@@ -116,8 +116,10 @@ function buildCondition(condition) {
         return { clause: null, value: null };
     }
 
+    // Fields that can use comparison operators (>, >=, <, <=)
     const numericFields = ["salary_min", "salary_max", "is_active"];
-    const isNumeric = numericFields.includes(field);
+    const dateFields = ["posted_date", "closing_date"];
+    const canCompare = numericFields.includes(field) || dateFields.includes(field);
 
     switch (operator) {
         case "eq":
@@ -127,19 +129,19 @@ function buildCondition(condition) {
             return { clause: `${field} != ?`, value };
 
         case "gt":
-            if (!isNumeric) return { clause: null, value: null };
+            if (!canCompare) return { clause: null, value: null };
             return { clause: `${field} > ?`, value };
 
         case "gte":
-            if (!isNumeric) return { clause: null, value: null };
+            if (!canCompare) return { clause: null, value: null };
             return { clause: `${field} >= ?`, value };
 
         case "lt":
-            if (!isNumeric) return { clause: null, value: null };
+            if (!canCompare) return { clause: null, value: null };
             return { clause: `${field} < ?`, value };
 
         case "lte":
-            if (!isNumeric) return { clause: null, value: null };
+            if (!canCompare) return { clause: null, value: null };
             return { clause: `${field} <= ?`, value };
 
         case "contains":
@@ -186,6 +188,11 @@ function buildDateRange(dateRange) {
             case "this_month":
                 clauses.push("closing_date >= date('now')");
                 clauses.push("closing_date <= date('now', '+30 days')");
+                break;
+
+            case "this_year":
+                // Use scraped_at as fallback when posted_date is NULL
+                clauses.push("COALESCE(posted_date, date(scraped_at)) >= date('now', 'start of year')");
                 break;
         }
     } else {

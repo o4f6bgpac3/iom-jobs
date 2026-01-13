@@ -139,6 +139,164 @@ export class AskComponent {
         this.hideResult();
 
         try {
+            // Use streaming endpoint for faster perceived response
+            await this.handleStreamingRequest(question);
+        } catch (error) {
+            console.error("Ask error:", error);
+            // Fall back to non-streaming endpoint on error
+            await this.handleNonStreamingRequest(question);
+        } finally {
+            this.hideLoading();
+        }
+    }
+
+    /**
+     * Handle streaming SSE request for faster response
+     */
+    async handleStreamingRequest(question) {
+        const response = await fetch(`${this.apiUrl}/ask/stream`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ question }),
+        });
+
+        // If not SSE, handle as regular response
+        if (!response.ok || !response.headers.get("content-type")?.includes("text/event-stream")) {
+            const data = await response.json();
+            if (data.success === false) {
+                this.handleErrorResponse(data);
+                return;
+            }
+            throw new Error("Unexpected response type");
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let streamedAnswer = "";
+        let initialCitations = [];
+
+        // Show result container immediately
+        this.container.querySelector(".ask-result").hidden = false;
+        const answerDiv = this.container.querySelector(".ask-answer");
+        const citationsDiv = this.container.querySelector(".ask-citations");
+        answerDiv.textContent = "";
+        citationsDiv.hidden = true;
+
+        // Hide loading spinner once streaming starts
+        this.container.querySelector(".ask-loading").hidden = true;
+
+        try {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split("\n");
+                buffer = lines.pop() || "";
+
+                for (const line of lines) {
+                    if (!line.startsWith("data: ")) continue;
+                    const data = line.slice(6).trim();
+                    if (data === "[DONE]") continue;
+
+                    try {
+                        const event = JSON.parse(data);
+
+                        if (event.type === "results") {
+                            // Show initial citations immediately
+                            initialCitations = event.citations || [];
+                            if (initialCitations.length > 0) {
+                                this.renderCitations(initialCitations);
+                            }
+                            // Show streaming indicator
+                            answerDiv.innerHTML = '<span class="streaming-indicator">Generating response...</span>';
+                        } else if (event.type === "chunk") {
+                            // Append streamed text (handle JSON structure)
+                            streamedAnswer += event.content;
+                            // Try to extract answer from partial JSON
+                            const partialAnswer = this.extractPartialAnswer(streamedAnswer);
+                            if (partialAnswer) {
+                                answerDiv.textContent = partialAnswer;
+                            }
+                        } else if (event.type === "complete") {
+                            // Final response - update with parsed answer and filtered citations
+                            answerDiv.textContent = event.answer || streamedAnswer;
+                            // Always render citations (will hide if empty)
+                            this.renderCitations(event.citations || []);
+                        }
+                    } catch {
+                        // Skip malformed JSON
+                    }
+                }
+            }
+        } finally {
+            reader.releaseLock();
+        }
+    }
+
+    /**
+     * Extract answer text from partial JSON response
+     */
+    extractPartialAnswer(partial) {
+        // Try to find "answer": "..." pattern
+        const match = partial.match(/"answer"\s*:\s*"([^"]*)/);
+        if (match) {
+            return match[1].replace(/\\n/g, "\n").replace(/\\"/g, '"');
+        }
+        return null;
+    }
+
+    /**
+     * Render citations list
+     */
+    renderCitations(citations) {
+        const citationsDiv = this.container.querySelector(".ask-citations");
+        // Filter out any malformed citations and check for valid ones
+        const validCitations = (citations || []).filter(c => c && c.id && c.title);
+
+        if (validCitations.length > 0) {
+            citationsDiv.innerHTML = `
+                <div class="citations-label">Related jobs:</div>
+                ${validCitations
+                    .map(
+                        (c) => `
+                    <div class="citation">
+                        <a href="#" class="citation-link" data-job-id="${c.id}">
+                            ${c.title}${c.employer ? ` - ${c.employer}` : ""}
+                        </a>
+                    </div>
+                `
+                    )
+                    .join("")}
+            `;
+            citationsDiv.hidden = false;
+        } else {
+            citationsDiv.innerHTML = "";
+            citationsDiv.hidden = true;
+        }
+    }
+
+    /**
+     * Handle error response
+     */
+    handleErrorResponse(data) {
+        let errorMessage = data.message || "Something went wrong. Please try again.";
+
+        if (data.error === "rate_limited" || data.error === "rate_limit_exceeded") {
+            errorMessage = "You've reached the daily question limit. Please try again tomorrow.";
+        } else if (data.error === "unanswerable") {
+            errorMessage = data.message;
+        }
+
+        this.showError(errorMessage);
+    }
+
+    /**
+     * Fallback to non-streaming endpoint
+     */
+    async handleNonStreamingRequest(question) {
+        try {
             const response = await fetch(`${this.apiUrl}/ask`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -150,22 +308,11 @@ export class AskComponent {
             if (data.success) {
                 this.showResult(data);
             } else {
-                let errorMessage = data.message || "Something went wrong. Please try again.";
-
-                // Handle specific error types
-                if (data.error === "rate_limited") {
-                    errorMessage = "You've reached the daily question limit. Please try again tomorrow.";
-                } else if (data.error === "unanswerable") {
-                    errorMessage = data.message;
-                }
-
-                this.showError(errorMessage);
+                this.handleErrorResponse(data);
             }
         } catch (error) {
-            console.error("Ask error:", error);
+            console.error("Non-streaming fallback error:", error);
             this.showError("Failed to connect. Please check your connection and try again.");
-        } finally {
-            this.hideLoading();
         }
     }
 

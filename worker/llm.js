@@ -171,3 +171,86 @@ export async function generateResponse(systemPrompt, userPrompt, env) {
         parseAsJson: true,
     }, "RESPONSE_GEN");
 }
+
+/**
+ * Stream LLM response for real-time output
+ * Returns a ReadableStream that yields chunks of the response
+ */
+export async function streamResponse(systemPrompt, userPrompt, env) {
+    const llmConfig = getLLMConfig(env);
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), llmConfig.timeoutMs);
+
+    const response = await fetch(llmConfig.apiUrl, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${env.LLM_API_KEY}`,
+        },
+        body: JSON.stringify({
+            model: llmConfig.model,
+            messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: userPrompt },
+            ],
+            temperature: llmConfig.temperature.natural,
+            max_tokens: llmConfig.maxTokens.natural,
+            stream: true,
+        }),
+        signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+        const error = new Error(`LLM streaming request failed: ${response.status}`);
+        if (response.status === 429) error.isRateLimit = true;
+        if (response.status === 401 || response.status === 403) error.isAuthError = true;
+        if (response.status >= 500) error.isServerError = true;
+        throw error;
+    }
+
+    return response.body;
+}
+
+/**
+ * Parse SSE stream and extract content chunks
+ * @param {ReadableStream} stream - The SSE stream from LLM API
+ * @returns {AsyncGenerator<string>} - Yields content chunks
+ */
+export async function* parseSSEStream(stream) {
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop() || "";
+
+            for (const line of lines) {
+                if (line.startsWith("data: ")) {
+                    const data = line.slice(6).trim();
+                    if (data === "[DONE]") return;
+
+                    try {
+                        const parsed = JSON.parse(data);
+                        const content = parsed.choices?.[0]?.delta?.content;
+                        if (content) {
+                            yield content;
+                        }
+                    } catch {
+                        // Skip malformed JSON
+                    }
+                }
+            }
+        }
+    } finally {
+        reader.releaseLock();
+    }
+}

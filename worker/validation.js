@@ -104,8 +104,14 @@ const AllowedOperatorSchema = z.enum([
     "in",
 ]);
 
-// Numeric fields that can use comparison operators
+// Numeric fields that can use comparison operators with number values
 const NUMERIC_FIELDS = ["salary_min", "salary_max"];
+
+// Date fields that can use comparison operators with date string values
+const DATE_FIELDS = ["posted_date", "closing_date"];
+
+// Date string regex pattern (YYYY-MM-DD)
+const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 // Condition schema for filters
 const ConditionSchema = z
@@ -116,9 +122,18 @@ const ConditionSchema = z
     })
     .refine(
         (data) => {
-            const numericOperators = ["gt", "gte", "lt", "lte"];
-            if (numericOperators.includes(data.operator)) {
-                return NUMERIC_FIELDS.includes(data.field) && typeof data.value === "number";
+            const comparisonOperators = ["gt", "gte", "lt", "lte"];
+            if (comparisonOperators.includes(data.operator)) {
+                // Allow comparison on numeric fields with number values
+                if (NUMERIC_FIELDS.includes(data.field)) {
+                    return typeof data.value === "number";
+                }
+                // Allow comparison on date fields with date string values
+                if (DATE_FIELDS.includes(data.field)) {
+                    return typeof data.value === "string" && DATE_PATTERN.test(data.value);
+                }
+                // Disallow comparison operators on other fields
+                return false;
             }
             if (data.operator === "contains" || data.operator === "starts_with") {
                 return typeof data.value === "string";
@@ -135,7 +150,7 @@ const ConditionSchema = z
 const DateRangeSchema = z.object({
     start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
     end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-    relative: z.enum(["today", "this_week", "next_week", "this_month"]).optional(),
+    relative: z.enum(["today", "this_week", "next_week", "this_month", "this_year"]).optional(),
 });
 
 // LLM query intent schema

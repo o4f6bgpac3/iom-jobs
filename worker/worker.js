@@ -4,7 +4,7 @@
 import { CONFIG } from "./config.js";
 import { scrapeJobs, getLastScrapeStatus } from "./scraper.js";
 import { validateQueryParams, ScrapeRequestSchema } from "./validation.js";
-import { handleAskRequest } from "./ask.js";
+import { handleAskRequest, handleAskStreamRequest } from "./ask.js";
 
 /**
  * Generate CORS headers
@@ -600,6 +600,18 @@ export default {
                 }
             } else if (url.pathname === "/ask" && request.method === "POST") {
                 response = await handleAskRequest(request, env);
+            } else if (url.pathname === "/ask/stream" && request.method === "POST") {
+                // Return SSE stream directly (not JSON wrapped)
+                const streamResponse = await handleAskStreamRequest(request, env);
+                // Add CORS headers
+                const headers = new Headers(streamResponse.headers);
+                Object.entries(corsHeaders(origin)).forEach(([key, value]) => {
+                    headers.set(key, value);
+                });
+                return new Response(streamResponse.body, {
+                    status: streamResponse.status,
+                    headers,
+                });
             } else if (url.pathname === "/sitemap.xml" && request.method === "GET") {
                 // Return sitemap directly (not JSON)
                 return await handleSitemapRequest(env);

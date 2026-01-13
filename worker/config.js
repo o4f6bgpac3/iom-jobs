@@ -12,16 +12,16 @@ const SCRAPER_DEFAULTS = {
 // LLM settings (Venice.ai default, OpenAI-compatible)
 const LLM_DEFAULTS = {
     apiUrl: "https://api.venice.ai/api/v1/chat/completions",
-    model: "zai-org-glm-4.7",
-    timeoutMs: 15000,
+    model: "llama-3.3-70b",
+    timeoutMs: 30000,
     maxRetries: 1,
     temperature: {
         structured: 0.1,
         natural: 0.7,
     },
     maxTokens: {
-        structured: 500,
-        natural: 500,
+        structured: 1500,
+        natural: 2000,
     },
 };
 
