@@ -214,7 +214,7 @@ function parseGroupedJobListings(html) {
 
     let sectionMatch;
     while ((sectionMatch = sectionPattern.exec(html)) !== null) {
-        const classification = cleanText(sectionMatch[1]);
+        const classification = cleanText(sectionMatch[1]).toUpperCase();
         const tableHtml = sectionMatch[2];
 
         // Parse job rows from this table
