@@ -151,7 +151,7 @@ export class AskComponent {
     }
 
     /**
-     * Handle streaming SSE request for faster response
+     * Handle streaming SSE request with named events
      */
     async handleStreamingRequest(question) {
         const response = await fetch(`${this.apiUrl}/ask/stream`, {
@@ -174,7 +174,6 @@ export class AskComponent {
         const decoder = new TextDecoder();
         let buffer = "";
         let streamedAnswer = "";
-        let initialCitations = [];
 
         // Show result container immediately
         this.container.querySelector(".ask-result").hidden = false;
@@ -183,68 +182,63 @@ export class AskComponent {
         answerDiv.textContent = "";
         citationsDiv.hidden = true;
 
-        // Hide loading spinner once streaming starts
-        this.container.querySelector(".ask-loading").hidden = true;
-
         try {
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
 
                 buffer += decoder.decode(value, { stream: true });
-                const lines = buffer.split("\n");
-                buffer = lines.pop() || "";
 
-                for (const line of lines) {
-                    if (!line.startsWith("data: ")) continue;
-                    const data = line.slice(6).trim();
-                    if (data === "[DONE]") continue;
+                // Parse named SSE events: "event: <name>\ndata: <json>\n\n"
+                const events = buffer.split("\n\n");
+                buffer = events.pop() || "";
 
-                    try {
-                        const event = JSON.parse(data);
+                for (const block of events) {
+                    const lines = block.split("\n");
+                    let eventName = null;
+                    let eventData = null;
 
-                        if (event.type === "results") {
-                            // Show initial citations immediately
-                            initialCitations = event.citations || [];
-                            if (initialCitations.length > 0) {
-                                this.renderCitations(initialCitations);
+                    for (const line of lines) {
+                        if (line.startsWith("event: ")) {
+                            eventName = line.slice(7).trim();
+                        } else if (line.startsWith("data: ")) {
+                            try {
+                                eventData = JSON.parse(line.slice(6).trim());
+                            } catch {
+                                // Skip malformed data
                             }
-                            // Show streaming indicator
-                            answerDiv.innerHTML = '<span class="streaming-indicator">Generating response...</span>';
-                        } else if (event.type === "chunk") {
-                            // Append streamed text (handle JSON structure)
-                            streamedAnswer += event.content;
-                            // Try to extract answer from partial JSON
-                            const partialAnswer = this.extractPartialAnswer(streamedAnswer);
-                            if (partialAnswer) {
-                                answerDiv.textContent = partialAnswer;
-                            }
-                        } else if (event.type === "complete") {
-                            // Final response - update with parsed answer and filtered citations
-                            answerDiv.textContent = event.answer || streamedAnswer;
-                            // Always render citations (will hide if empty)
-                            this.renderCitations(event.citations || []);
                         }
-                    } catch {
-                        // Skip malformed JSON
+                    }
+
+                    if (!eventName || !eventData) continue;
+
+                    if (eventName === "status") {
+                        // Update loading message
+                        const loadingSpan = this.container.querySelector(".ask-loading span");
+                        if (loadingSpan) {
+                            loadingSpan.textContent = eventData.message || "Searching...";
+                        }
+                        // Also show in answer area as streaming indicator
+                        answerDiv.innerHTML = `<span class="streaming-indicator">${eventData.message || "Searching..."}</span>`;
+                        this.container.querySelector(".ask-loading").hidden = true;
+                    } else if (eventName === "chunk") {
+                        // Append plain text chunk
+                        streamedAnswer += eventData.text;
+                        answerDiv.textContent = streamedAnswer;
+                    } else if (eventName === "complete") {
+                        // Finalise answer and render citations
+                        if (!streamedAnswer) {
+                            answerDiv.textContent = "Done.";
+                        }
+                        this.renderCitations(eventData.citations || []);
+                    } else if (eventName === "error") {
+                        this.handleErrorResponse(eventData);
                     }
                 }
             }
         } finally {
             reader.releaseLock();
         }
-    }
-
-    /**
-     * Extract answer text from partial JSON response
-     */
-    extractPartialAnswer(partial) {
-        // Try to find "answer": "..." pattern
-        const match = partial.match(/"answer"\s*:\s*"([^"]*)/);
-        if (match) {
-            return match[1].replace(/\\n/g, "\n").replace(/\\"/g, '"');
-        }
-        return null;
     }
 
     /**

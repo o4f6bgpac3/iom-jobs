@@ -1,26 +1,23 @@
 // Ask Handler for IOM Job Scraper
-// Processes natural language questions about jobs
+// Text-to-SQL pipeline for natural language job queries
 
 import { checkRateLimit } from "./rateLimiter.js";
-import { validateQuestion, QueryIntentSchema, UnanswerableSchema, RejectedSchema } from "./validation.js";
-import { queryLLM, generateResponse, streamResponse, parseSSEStream } from "./llm.js";
-import { buildQuery, buildCitations } from "./queryBuilder.js";
+import { validateQuestion } from "./validation.js";
+import { validateSQL } from "./sqlValidator.js";
+import { generateSQLWithRetry, generateResponse, generateResponseStreaming } from "./llm.js";
 import {
-    QUERY_SYSTEM_PROMPT,
+    SQL_SYSTEM_PROMPT,
     RESPONSE_SYSTEM_PROMPT,
-    buildQueryPrompt,
     buildResponsePrompt,
     injectDates,
-    generateFallbackResponse,
 } from "./prompts.js";
 
-// Intent cache settings
-const INTENT_CACHE_TTL = 86400; // 24 hours
-const INTENT_CACHE_PREFIX = "intent:";
+// Response cache settings
+const RESPONSE_CACHE_TTL = 14400; // 4 hours
+const RESPONSE_CACHE_PREFIX = "ask:v2:";
 
 /**
- * Normalize question for cache key
- * Lowercases, removes punctuation, collapses whitespace
+ * Normalise question for cache key generation
  */
 function normalizeQuestion(question) {
     return question
@@ -31,43 +28,133 @@ function normalizeQuestion(question) {
 }
 
 /**
- * Get cached intent or null
+ * Generate a SHA-256 cache key from question + date context
  */
-async function getCachedIntent(question, env) {
-    const cacheKey = INTENT_CACHE_PREFIX + normalizeQuestion(question);
+async function generateCacheKey(question) {
+    const today = new Date().toISOString().split("T")[0];
+    const now = new Date();
+    const weekStart = new Date(now);
+    weekStart.setDate(weekStart.getDate() - weekStart.getDay() + 1);
+    const weekStartStr = weekStart.toISOString().split("T")[0];
+
+    const input = JSON.stringify({
+        q: normalizeQuestion(question),
+        today,
+        weekStart: weekStartStr,
+    });
+
+    const encoded = new TextEncoder().encode(input);
+    const hashBuffer = await crypto.subtle.digest("SHA-256", encoded);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    const hashHex = hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
+
+    return RESPONSE_CACHE_PREFIX + hashHex;
+}
+
+/**
+ * Get cached response or null
+ */
+async function getCachedResponse(question, env) {
     try {
-        const cached = await env.KV.get(cacheKey, { type: "json" });
+        const key = await generateCacheKey(question);
+        const cached = await env.RATE_LIMITER.get(key, { type: "json" });
         if (cached) {
-            console.log("Intent cache hit:", cacheKey);
+            console.log("Response cache hit:", key);
             return cached;
         }
     } catch (error) {
-        console.error("Intent cache read error:", error);
+        console.error("Cache read error:", error);
     }
     return null;
 }
 
 /**
- * Cache a successful intent
+ * Cache a successful response
  */
-async function cacheIntent(question, intent, env) {
-    const cacheKey = INTENT_CACHE_PREFIX + normalizeQuestion(question);
+async function cacheResponse(question, response, env) {
     try {
-        await env.KV.put(cacheKey, JSON.stringify(intent), { expirationTtl: INTENT_CACHE_TTL });
-        console.log("Intent cached:", cacheKey);
+        const key = await generateCacheKey(question);
+        await env.RATE_LIMITER.put(key, JSON.stringify(response), {
+            expirationTtl: RESPONSE_CACHE_TTL,
+        });
+        console.log("Response cached:", key);
     } catch (error) {
-        console.error("Intent cache write error:", error);
+        console.error("Cache write error:", error);
     }
 }
 
 /**
- * Handle /ask endpoint
- * @param {Request} request
- * @param {Object} env
- * @returns {Object} { result, status }
+ * Create a SQL executor that validates then runs against D1
+ */
+function createSQLExecutor(env) {
+    return async function executeSQL(sql) {
+        const validation = validateSQL(sql);
+        if (!validation.valid) {
+            throw new Error(validation.error);
+        }
+
+        const stmt = env.DB.prepare(validation.sanitisedSql);
+        const response = await stmt.all();
+        return response.results || [];
+    };
+}
+
+/**
+ * Build citations from query result rows
+ */
+function buildCitations(results) {
+    if (!Array.isArray(results) || results.length === 0) {
+        return [];
+    }
+
+    // COUNT queries return [{count: N}] — no citations
+    if (results.length === 1 && results[0].count !== undefined && !results[0].title) {
+        return [];
+    }
+
+    return results
+        .filter(row => row.id && row.title)
+        .slice(0, 5)
+        .map(row => ({
+            id: row.id,
+            title: row.title,
+            employer: row.employer,
+            closing_date: row.closing_date,
+            source_url: row.source_url,
+        }));
+}
+
+/**
+ * Map error types to HTTP status codes
+ */
+function mapErrorStatus(error) {
+    if (error.isTimeout) return 504;
+    if (error.isRateLimit) return 503;
+    if (error.isAuthError) return 502;
+    return 502;
+}
+
+/**
+ * Format a named SSE event
+ */
+function formatSSE(event, data) {
+    return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+/**
+ * Standard SSE response headers
+ */
+const sseHeaders = {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+};
+
+/**
+ * Handle /ask endpoint (non-streaming)
  */
 export async function handleAskRequest(request, env) {
-    // 1. Check rate limit (ask tier: 10 requests per day)
+    // 1. Rate limit check
     const rateLimit = await checkRateLimit(request, env, "ask");
     if (!rateLimit.allowed) {
         return {
@@ -105,168 +192,73 @@ export async function handleAskRequest(request, env) {
 
     const question = inputValidation.data.question;
 
-    // 3. Parse question into structured query - check cache first
-    let llmResponse;
-    let intentFromCache = false;
-
-    // Try cache first
-    llmResponse = await getCachedIntent(question, env);
-    if (llmResponse) {
-        intentFromCache = true;
-    } else {
-        // Cache miss - call LLM
-        try {
-            const systemPrompt = injectDates(QUERY_SYSTEM_PROMPT);
-            const userPrompt = buildQueryPrompt(question);
-            llmResponse = await queryLLM(systemPrompt, userPrompt, env);
-        } catch (error) {
-            console.error("LLM query parsing error:", error);
-
-            if (error.isTimeout) {
-                return {
-                    result: { success: false, error: "timeout", message: "Request timed out. Please try again." },
-                    status: 504,
-                };
-            }
-            if (error.isRateLimit) {
-                return {
-                    result: { success: false, error: "llm_rate_limit", message: "AI service temporarily unavailable." },
-                    status: 503,
-                };
-            }
-            if (error.isAuthError) {
-                return {
-                    result: { success: false, error: "configuration_error", message: "Service configuration error." },
-                    status: 502,
-                };
-            }
-
-            return {
-                result: { success: false, error: "llm_error", message: "Failed to process question." },
-                status: 502,
-            };
-        }
+    // 3. Check response cache
+    const cached = await getCachedResponse(question, env);
+    if (cached) {
+        return { result: { ...cached, cached: true }, status: 200 };
     }
 
-    // 4. Check for rejected or unanswerable
-    if (RejectedSchema.safeParse(llmResponse).success) {
-        return {
-            result: {
-                success: false,
-                error: "rejected",
-                message: llmResponse.reason || "This question cannot be answered.",
-            },
-            status: 400,
-        };
-    }
-
-    if (UnanswerableSchema.safeParse(llmResponse).success) {
-        return {
-            result: {
-                success: false,
-                error: "unanswerable",
-                message: llmResponse.reason || "I can only answer questions about Isle of Man Government job listings.",
-            },
-            status: 400,
-        };
-    }
-
-    // 5. Validate the query intent
-    const intentValidation = QueryIntentSchema.safeParse(llmResponse);
-    if (!intentValidation.success) {
-        console.error("Invalid LLM response:", llmResponse, intentValidation.error);
-        return {
-            result: { success: false, error: "llm_invalid_response", message: "Failed to understand the question." },
-            status: 500,
-        };
-    }
-
-    const intent = intentValidation.data;
-
-    // Cache the validated intent (only if it came from LLM, not cache)
-    if (!intentFromCache) {
-        await cacheIntent(question, llmResponse, env);
-    }
-
-    // 6. Build and execute database query
-    let results;
-    let jobsForCitations = []; // Actual job rows for building citations
+    // 4. Generate SQL via text-to-SQL with self-correction
+    let sqlResult;
     try {
-        const { sql, params } = buildQuery(intent);
-        console.log("Executing SQL:", sql, "Params:", params);
-
-        const stmt = env.DB.prepare(sql);
-        const bound = params.length > 0 ? stmt.bind(...params) : stmt;
-        const response = await bound.all();
-        results = response.results || [];
-
-        // For count queries, also fetch actual jobs for citations
-        if (intent.query_type === "count" && results.length > 0 && results[0].count !== undefined) {
-            const jobsIntent = { ...intent, query_type: "search", limit: 10 };
-            const { sql: jobsSql, params: jobsParams } = buildQuery(jobsIntent);
-            const jobsStmt = env.DB.prepare(jobsSql);
-            const jobsBound = jobsParams.length > 0 ? jobsStmt.bind(...jobsParams) : jobsStmt;
-            const jobsResponse = await jobsBound.all();
-            jobsForCitations = jobsResponse.results || [];
-        }
-    } catch (dbError) {
-        console.error("Database query error:", dbError);
+        const systemPrompt = injectDates(SQL_SYSTEM_PROMPT);
+        const executor = createSQLExecutor(env);
+        sqlResult = await generateSQLWithRetry(systemPrompt, question, env, executor);
+    } catch (error) {
+        console.error("SQL generation error:", error);
         return {
-            result: { success: false, error: "database_error", message: "Failed to search jobs." },
-            status: 500,
+            result: { success: false, error: "llm_error", message: "Failed to process question." },
+            status: mapErrorStatus(error),
         };
     }
 
-    // 7. Generate natural language response with relevance filtering
+    // 5. Handle sentinels
+    if (sqlResult.sentinel) {
+        const { type, reason } = sqlResult.sentinel;
+        return {
+            result: {
+                success: false,
+                error: type,
+                message: reason || "I can only answer questions about Isle of Man Government job listings.",
+            },
+            status: 400,
+        };
+    }
+
+    const { results } = sqlResult;
+
+    // 6. Generate natural language response
     let answer;
-    let relevantIds = [];
     try {
-        const systemPrompt = injectDates(RESPONSE_SYSTEM_PROMPT);
-        const userPrompt = buildResponsePrompt(question, intent.query_type, results);
-        const response = await generateResponse(systemPrompt, userPrompt, env);
-
-        // Extract answer and relevant IDs from structured response
-        answer = response.answer || response;
-        relevantIds = Array.isArray(response.relevant_ids) ? response.relevant_ids : [];
+        const responseSystemPrompt = injectDates(RESPONSE_SYSTEM_PROMPT);
+        const responseUserPrompt = buildResponsePrompt(question, results);
+        answer = await generateResponse(responseSystemPrompt, responseUserPrompt, env);
     } catch (error) {
         console.error("Response generation error:", error);
-        // Fall back to template response
-        return {
-            result: generateFallbackResponse(intent.query_type, results),
-            status: 200,
-        };
+        answer = results.length > 0
+            ? `I found ${results.length} job${results.length > 1 ? "s" : ""} matching your search.`
+            : "I couldn't find any jobs matching your criteria. Try broadening your search.";
     }
 
-    // 8. Filter results to only include relevant jobs
-    // For count queries, use jobsForCitations; otherwise filter from results
-    const isCountQuery = intent.query_type === "count" && results.length > 0 && results[0].count !== undefined;
-    const jobResults = isCountQuery ? jobsForCitations : results;
-    const relevantResults = relevantIds.length > 0
-        ? jobResults.filter(job => relevantIds.includes(job.id))
-        : jobResults;
-
-    // 9. Return success response
-    return {
-        result: {
-            success: true,
-            answer,
-            citations: buildCitations(intent, relevantResults),
-            query_type: intent.query_type,
-            result_count: isCountQuery ? results[0].count : relevantResults.length,
-        },
-        status: 200,
+    // 7. Build citations and cache
+    const citations = buildCitations(results);
+    const responseData = {
+        success: true,
+        answer,
+        citations,
+        result_count: results.length,
     };
+
+    await cacheResponse(question, responseData, env);
+
+    return { result: responseData, status: 200 };
 }
 
 /**
- * Handle /ask/stream endpoint - Server-Sent Events for real-time responses
- * Streams results immediately, then streams LLM summary
- * @param {Request} request
- * @param {Object} env
- * @returns {Response} SSE stream
+ * Handle /ask/stream endpoint — Server-Sent Events
  */
 export async function handleAskStreamRequest(request, env) {
-    // 1. Check rate limit
+    // 1. Rate limit check
     const rateLimit = await checkRateLimit(request, env, "ask");
     if (!rateLimit.allowed) {
         return new Response(
@@ -275,7 +267,7 @@ export async function handleAskStreamRequest(request, env) {
                 error: "rate_limit_exceeded",
                 message: `Daily limit reached. Try again in ${Math.ceil(rateLimit.resetIn / 3600)} hours.`,
             }),
-            { status: 429, headers: { "Content-Type": "application/json" } }
+            { status: 429, headers: { "Content-Type": "application/json" } },
         );
     }
 
@@ -286,7 +278,7 @@ export async function handleAskStreamRequest(request, env) {
     } catch {
         return new Response(
             JSON.stringify({ success: false, error: "invalid_request", message: "Invalid JSON body" }),
-            { status: 400, headers: { "Content-Type": "application/json" } }
+            { status: 400, headers: { "Content-Type": "application/json" } },
         );
     }
 
@@ -298,166 +290,120 @@ export async function handleAskStreamRequest(request, env) {
                 error: "invalid_question",
                 message: inputValidation.error.errors[0].message,
             }),
-            { status: 400, headers: { "Content-Type": "application/json" } }
+            { status: 400, headers: { "Content-Type": "application/json" } },
         );
     }
 
     const question = inputValidation.data.question;
 
-    // 3. Parse question - check cache first
-    let llmResponse;
-    let intentFromCache = false;
-
-    llmResponse = await getCachedIntent(question, env);
-    if (llmResponse) {
-        intentFromCache = true;
-    } else {
-        try {
-            const systemPrompt = injectDates(QUERY_SYSTEM_PROMPT);
-            const userPrompt = buildQueryPrompt(question);
-            llmResponse = await queryLLM(systemPrompt, userPrompt, env);
-        } catch (error) {
-            console.error("LLM query parsing error:", error);
-            return new Response(
-                JSON.stringify({ success: false, error: "llm_error", message: "Failed to process question." }),
-                { status: 502, headers: { "Content-Type": "application/json" } }
-            );
-        }
+    // 3. Check response cache
+    const cached = await getCachedResponse(question, env);
+    if (cached) {
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream({
+            start(controller) {
+                // Send cached answer as chunks then complete
+                controller.enqueue(encoder.encode(formatSSE("status", { phase: "cached", message: "Found cached answer" })));
+                controller.enqueue(encoder.encode(formatSSE("chunk", { text: cached.answer })));
+                controller.enqueue(encoder.encode(formatSSE("complete", {
+                    success: true,
+                    citations: cached.citations,
+                    cached: true,
+                })));
+                controller.close();
+            },
+        });
+        return new Response(stream, { headers: sseHeaders });
     }
 
-    // 4. Check for rejected/unanswerable
-    if (RejectedSchema.safeParse(llmResponse).success) {
-        return new Response(
-            JSON.stringify({ success: false, error: "rejected", message: llmResponse.reason }),
-            { status: 400, headers: { "Content-Type": "application/json" } }
-        );
-    }
-
-    if (UnanswerableSchema.safeParse(llmResponse).success) {
-        return new Response(
-            JSON.stringify({ success: false, error: "unanswerable", message: llmResponse.reason }),
-            { status: 400, headers: { "Content-Type": "application/json" } }
-        );
-    }
-
-    // 5. Validate intent
-    const intentValidation = QueryIntentSchema.safeParse(llmResponse);
-    if (!intentValidation.success) {
-        return new Response(
-            JSON.stringify({ success: false, error: "llm_invalid_response", message: "Failed to understand question." }),
-            { status: 500, headers: { "Content-Type": "application/json" } }
-        );
-    }
-
-    const intent = intentValidation.data;
-
-    // Cache if from LLM
-    if (!intentFromCache) {
-        await cacheIntent(question, llmResponse, env);
-    }
-
-    // 6. Execute database query
-    let results;
-    let jobsForCitations = [];
-    try {
-        const { sql, params } = buildQuery(intent);
-        const stmt = env.DB.prepare(sql);
-        const bound = params.length > 0 ? stmt.bind(...params) : stmt;
-        const response = await bound.all();
-        results = response.results || [];
-
-        // For count queries, also fetch actual jobs for citations
-        if (intent.query_type === "count" && results.length > 0 && results[0].count !== undefined) {
-            const jobsIntent = { ...intent, query_type: "search", limit: 10 };
-            const { sql: jobsSql, params: jobsParams } = buildQuery(jobsIntent);
-            const jobsStmt = env.DB.prepare(jobsSql);
-            const jobsBound = jobsParams.length > 0 ? jobsStmt.bind(...jobsParams) : jobsStmt;
-            const jobsResponse = await jobsBound.all();
-            jobsForCitations = jobsResponse.results || [];
-        }
-    } catch (dbError) {
-        console.error("Database error:", dbError);
-        return new Response(
-            JSON.stringify({ success: false, error: "database_error", message: "Failed to search jobs." }),
-            { status: 500, headers: { "Content-Type": "application/json" } }
-        );
-    }
-
-    // Determine if this is a count query and get appropriate job list
-    const isCountQuery = intent.query_type === "count" && results.length > 0 && results[0].count !== undefined;
-    const jobResults = isCountQuery ? jobsForCitations : results;
-
-    // 7. Create SSE stream
+    // 4. Stream the full pipeline
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
         async start(controller) {
-            // Send initial results immediately
-            const initialData = {
-                type: "results",
-                query_type: intent.query_type,
-                result_count: isCountQuery ? results[0].count : jobResults.length,
-                citations: buildCitations(intent, jobResults.slice(0, 10)),
+            const send = (event, data) => {
+                controller.enqueue(encoder.encode(formatSSE(event, data)));
             };
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(initialData)}\n\n`));
 
-            // Stream LLM response
             try {
-                const systemPrompt = injectDates(RESPONSE_SYSTEM_PROMPT);
-                const userPrompt = buildResponsePrompt(question, intent.query_type, results);
-                const llmStream = await streamResponse(systemPrompt, userPrompt, env);
+                // Phase 1: Generate SQL
+                send("status", { phase: "sql", message: "Understanding your question..." });
 
-                let fullContent = "";
-                for await (const chunk of parseSSEStream(llmStream)) {
-                    fullContent += chunk;
-                    controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "chunk", content: chunk })}\n\n`));
-                }
+                const systemPrompt = injectDates(SQL_SYSTEM_PROMPT);
+                const executor = createSQLExecutor(env);
+                let sqlResult;
 
-                // Parse final response for relevant_ids
-                let relevantIds = [];
                 try {
-                    const parsed = JSON.parse(fullContent.replace(/```json\n?|\n?```/g, "").trim());
-                    relevantIds = Array.isArray(parsed.relevant_ids) ? parsed.relevant_ids : [];
-
-                    // Send final answer with filtered results
-                    const relevantResults = relevantIds.length > 0
-                        ? jobResults.filter(job => relevantIds.includes(job.id))
-                        : jobResults;
-
-                    controller.enqueue(encoder.encode(`data: ${JSON.stringify({
-                        type: "complete",
-                        answer: parsed.answer || fullContent,
-                        citations: buildCitations(intent, relevantResults.slice(0, 5)),
-                        result_count: isCountQuery ? results[0].count : relevantResults.length,
-                    })}\n\n`));
-                } catch {
-                    // If parsing fails, send raw content
-                    controller.enqueue(encoder.encode(`data: ${JSON.stringify({
-                        type: "complete",
-                        answer: fullContent,
-                        citations: buildCitations(intent, jobResults.slice(0, 5)),
-                        result_count: isCountQuery ? results[0].count : jobResults.length,
-                    })}\n\n`));
+                    sqlResult = await generateSQLWithRetry(systemPrompt, question, env, executor);
+                } catch (error) {
+                    console.error("SQL generation error:", error);
+                    send("error", { error: "llm_error", message: "Failed to process question." });
+                    controller.close();
+                    return;
                 }
+
+                // Handle sentinels
+                if (sqlResult.sentinel) {
+                    const { type, reason } = sqlResult.sentinel;
+                    send("error", {
+                        error: type,
+                        message: reason || "I can only answer questions about Isle of Man Government job listings.",
+                    });
+                    controller.close();
+                    return;
+                }
+
+                const { results } = sqlResult;
+                const citations = buildCitations(results);
+
+                // Phase 2: Stream natural language response
+                send("status", { phase: "response", message: "Composing answer..." });
+
+                const responseSystemPrompt = injectDates(RESPONSE_SYSTEM_PROMPT);
+                const responseUserPrompt = buildResponsePrompt(question, results);
+
+                let fullAnswer = "";
+                try {
+                    fullAnswer = await generateResponseStreaming(
+                        responseSystemPrompt,
+                        responseUserPrompt,
+                        env,
+                        (chunk) => send("chunk", { text: chunk }),
+                    );
+                } catch (error) {
+                    console.error("Streaming response error:", error);
+                    // Fallback to non-streaming
+                    try {
+                        fullAnswer = await generateResponse(responseSystemPrompt, responseUserPrompt, env);
+                        send("chunk", { text: fullAnswer });
+                    } catch {
+                        fullAnswer = results.length > 0
+                            ? `I found ${results.length} job${results.length > 1 ? "s" : ""} matching your search.`
+                            : "I couldn't find any jobs matching your criteria.";
+                        send("chunk", { text: fullAnswer });
+                    }
+                }
+
+                // Phase 3: Complete
+                send("complete", { success: true, citations, cached: false });
+
+                // Cache the response in the background
+                const responseData = {
+                    success: true,
+                    answer: fullAnswer,
+                    citations,
+                    result_count: results.length,
+                };
+                cacheResponse(question, responseData, env).catch(err =>
+                    console.error("Background cache error:", err)
+                );
             } catch (error) {
-                console.error("Streaming error:", error);
-                // Fall back to template response
-                const fallback = generateFallbackResponse(intent.query_type, results);
-                controller.enqueue(encoder.encode(`data: ${JSON.stringify({
-                    type: "complete",
-                    ...fallback,
-                })}\n\n`));
+                console.error("Stream error:", error);
+                send("error", { error: "internal_error", message: "Something went wrong." });
             }
 
-            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
             controller.close();
         },
     });
 
-    return new Response(stream, {
-        headers: {
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-        },
-    });
+    return new Response(stream, { headers: sseHeaders });
 }
