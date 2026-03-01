@@ -38,15 +38,16 @@ Table: jobs
 ## Rules
 1. Always filter is_active = 1 unless the user explicitly asks about closed/expired jobs
 2. Use LIKE with % wildcards for text search (title, employer, location, summary, description)
-3. salary_min and salary_max are numeric REALs — use >, <, >=, <= for comparisons
-4. Dates are TEXT in YYYY-MM-DD format — compare with >, <, =, BETWEEN
-5. posted_date may be NULL for older records — always use COALESCE(posted_date, date(scraped_at)) when filtering or sorting by posted date
-6. Use date('{{TODAY_DATE}}') for today, date('{{TOMORROW_DATE}}') for tomorrow
-7. For "this week": closing_date BETWEEN '{{TODAY_DATE}}' AND date('{{TODAY_DATE}}', '+7 days')
-8. For "this year": COALESCE(posted_date, date(scraped_at)) >= '{{YEAR_START}}'
-9. For "this month": COALESCE(posted_date, date(scraped_at)) >= date('{{TODAY_DATE}}', 'start of month')
-10. ORDER BY COALESCE(posted_date, date(scraped_at)) DESC is a sensible default; use closing_date ASC for "closing soon"
-11. Return only the SQL query — no explanation, no markdown fences
+3. Only search classification when the user explicitly mentions a category (e.g. "IT jobs", "health jobs"). For specific roles like "software developer" or "nurse", search title and summary — do NOT broaden to the whole classification
+4. salary_min and salary_max are numeric REALs — use >, <, >=, <= for comparisons
+5. Dates are TEXT in YYYY-MM-DD format — compare with >, <, =, BETWEEN
+6. posted_date may be NULL for older records — always use COALESCE(posted_date, date(scraped_at)) when filtering or sorting by posted date
+7. Use date('{{TODAY_DATE}}') for today, date('{{TOMORROW_DATE}}') for tomorrow
+8. For "this week": closing_date BETWEEN '{{TODAY_DATE}}' AND date('{{TODAY_DATE}}', '+7 days')
+9. For "this year": COALESCE(posted_date, date(scraped_at)) >= '{{YEAR_START}}'
+10. For "this month": COALESCE(posted_date, date(scraped_at)) >= date('{{TODAY_DATE}}', 'start of month')
+11. ORDER BY COALESCE(posted_date, date(scraped_at)) DESC is a sensible default; use closing_date ASC for "closing soon"
+12. Return only the SQL query — no explanation, no markdown fences
 
 ## Examples
 
@@ -75,7 +76,7 @@ User: health and social care jobs paying over 30k
 SELECT * FROM jobs WHERE is_active = 1 AND classification LIKE '%HEALTH%SOCIAL%CARE%' AND salary_min >= 30000 ORDER BY salary_max DESC LIMIT 20
 
 User: how many software dev jobs this year
-SELECT COUNT(*) as count FROM jobs WHERE COALESCE(posted_date, date(scraped_at)) >= '{{YEAR_START}}' AND (title LIKE '%software%' OR title LIKE '%developer%' OR summary LIKE '%software%' OR summary LIKE '%developer%' OR classification LIKE '%INFORMATION TECHNOLOGY%')
+SELECT COUNT(*) as count FROM jobs WHERE COALESCE(posted_date, date(scraped_at)) >= '{{YEAR_START}}' AND (title LIKE '%software%' OR title LIKE '%developer%' OR summary LIKE '%software%' OR summary LIKE '%developer%')
 
 User: what's the weather
 UNANSWERABLE: I can only answer questions about Isle of Man Government job listings.
