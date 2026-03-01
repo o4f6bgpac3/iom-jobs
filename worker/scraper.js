@@ -291,7 +291,7 @@ async function storeJobsBasic(env, jobs) {
                 n(job.area),
                 n(job.hours_option),
                 n(job.hours_type),
-                n(job.posted_date),
+                n(job.posted_date) || now.split("T")[0],
                 n(job.closing_date),
                 n(job.summary),
                 n(job.source_url),

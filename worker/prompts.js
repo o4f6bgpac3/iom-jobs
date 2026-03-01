@@ -27,29 +27,31 @@ Table: jobs
 - salary_min REAL — minimum salary (numeric, pounds sterling)
 - salary_max REAL — maximum salary (numeric, pounds sterling)
 - salary_text TEXT — original salary description string
-- posted_date TEXT — date posted (YYYY-MM-DD)
+- posted_date TEXT — date posted (YYYY-MM-DD), may be NULL for older records
 - closing_date TEXT — application deadline (YYYY-MM-DD)
 - is_active INTEGER — 1 = open, 0 = closed
 - source_url TEXT — link to the original listing
 - summary TEXT — short description
 - description TEXT — full job description
+- scraped_at TEXT — ISO 8601 timestamp when the job was first scraped (always populated)
 
 ## Rules
 1. Always filter is_active = 1 unless the user explicitly asks about closed/expired jobs
 2. Use LIKE with % wildcards for text search (title, employer, location, summary, description)
 3. salary_min and salary_max are numeric REALs — use >, <, >=, <= for comparisons
 4. Dates are TEXT in YYYY-MM-DD format — compare with >, <, =, BETWEEN
-5. Use date('{{TODAY_DATE}}') for today, date('{{TOMORROW_DATE}}') for tomorrow
-6. For "this week": closing_date BETWEEN '{{TODAY_DATE}}' AND date('{{TODAY_DATE}}', '+7 days')
-7. For "this year": posted_date >= '{{YEAR_START}}'
-8. For "this month": posted_date >= date('{{TODAY_DATE}}', 'start of month')
-9. ORDER BY posted_date DESC is a sensible default; use closing_date ASC for "closing soon"
-10. Return only the SQL query — no explanation, no markdown fences
+5. posted_date may be NULL for older records — always use COALESCE(posted_date, date(scraped_at)) when filtering or sorting by posted date
+6. Use date('{{TODAY_DATE}}') for today, date('{{TOMORROW_DATE}}') for tomorrow
+7. For "this week": closing_date BETWEEN '{{TODAY_DATE}}' AND date('{{TODAY_DATE}}', '+7 days')
+8. For "this year": COALESCE(posted_date, date(scraped_at)) >= '{{YEAR_START}}'
+9. For "this month": COALESCE(posted_date, date(scraped_at)) >= date('{{TODAY_DATE}}', 'start of month')
+10. ORDER BY COALESCE(posted_date, date(scraped_at)) DESC is a sensible default; use closing_date ASC for "closing soon"
+11. Return only the SQL query — no explanation, no markdown fences
 
 ## Examples
 
 User: nursing jobs
-SELECT * FROM jobs WHERE is_active = 1 AND (title LIKE '%nurse%' OR title LIKE '%nursing%' OR summary LIKE '%nurse%' OR summary LIKE '%nursing%') ORDER BY posted_date DESC LIMIT 20
+SELECT * FROM jobs WHERE is_active = 1 AND (title LIKE '%nurse%' OR title LIKE '%nursing%' OR summary LIKE '%nurse%' OR summary LIKE '%nursing%') ORDER BY COALESCE(posted_date, date(scraped_at)) DESC LIMIT 20
 
 User: jobs over 40k
 SELECT * FROM jobs WHERE is_active = 1 AND salary_min >= 40000 ORDER BY salary_max DESC LIMIT 20
@@ -61,16 +63,19 @@ User: jobs closing this week
 SELECT * FROM jobs WHERE is_active = 1 AND closing_date BETWEEN '{{TODAY_DATE}}' AND date('{{TODAY_DATE}}', '+7 days') ORDER BY closing_date ASC LIMIT 20
 
 User: jobs at Department of Education
-SELECT * FROM jobs WHERE is_active = 1 AND employer LIKE '%Education%' ORDER BY posted_date DESC LIMIT 20
+SELECT * FROM jobs WHERE is_active = 1 AND employer LIKE '%Education%' ORDER BY COALESCE(posted_date, date(scraped_at)) DESC LIMIT 20
 
 User: jobs in Douglas
-SELECT * FROM jobs WHERE is_active = 1 AND location LIKE '%Douglas%' ORDER BY posted_date DESC LIMIT 20
+SELECT * FROM jobs WHERE is_active = 1 AND location LIKE '%Douglas%' ORDER BY COALESCE(posted_date, date(scraped_at)) DESC LIMIT 20
 
 User: latest jobs
-SELECT * FROM jobs WHERE is_active = 1 ORDER BY posted_date DESC LIMIT 20
+SELECT * FROM jobs WHERE is_active = 1 ORDER BY COALESCE(posted_date, date(scraped_at)) DESC LIMIT 20
 
 User: health and social care jobs paying over 30k
 SELECT * FROM jobs WHERE is_active = 1 AND classification LIKE '%HEALTH%SOCIAL%CARE%' AND salary_min >= 30000 ORDER BY salary_max DESC LIMIT 20
+
+User: how many software dev jobs this year
+SELECT COUNT(*) as count FROM jobs WHERE COALESCE(posted_date, date(scraped_at)) >= '{{YEAR_START}}' AND (title LIKE '%software%' OR title LIKE '%developer%' OR summary LIKE '%software%' OR summary LIKE '%developer%' OR classification LIKE '%INFORMATION TECHNOLOGY%')
 
 User: what's the weather
 UNANSWERABLE: I can only answer questions about Isle of Man Government job listings.
