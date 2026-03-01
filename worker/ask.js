@@ -130,6 +130,7 @@ function buildCitations(results) {
 function mapErrorStatus(error) {
     if (error.isTimeout) return 504;
     if (error.isRateLimit) return 503;
+    if (error.isQuotaExceeded) return 503;
     if (error.isAuthError) return 502;
     return 502;
 }
@@ -206,8 +207,11 @@ export async function handleAskRequest(request, env) {
         sqlResult = await generateSQLWithRetry(systemPrompt, question, env, executor);
     } catch (error) {
         console.error("SQL generation error:", error);
+        const message = error.isQuotaExceeded
+            ? "AI service temporarily unavailable. Please try again later."
+            : "Failed to process question.";
         return {
-            result: { success: false, error: "llm_error", message: "Failed to process question." },
+            result: { success: false, error: "llm_error", message },
             status: mapErrorStatus(error),
         };
     }
@@ -336,7 +340,10 @@ export async function handleAskStreamRequest(request, env) {
                     sqlResult = await generateSQLWithRetry(systemPrompt, question, env, executor);
                 } catch (error) {
                     console.error("SQL generation error:", error);
-                    send("error", { error: "llm_error", message: "Failed to process question." });
+                    const message = error.isQuotaExceeded
+                        ? "AI service temporarily unavailable. Please try again later."
+                        : "Failed to process question.";
+                    send("error", { error: "llm_error", message });
                     controller.close();
                     return;
                 }

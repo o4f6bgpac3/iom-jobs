@@ -40,6 +40,11 @@ async function makeLLMRequest(systemPrompt, userPrompt, env, options = {}) {
             error.isRateLimit = true;
             throw error;
         }
+        if (response.status === 402) {
+            const error = new Error("LLM service quota exceeded");
+            error.isQuotaExceeded = true;
+            throw error;
+        }
         if (response.status === 401 || response.status === 403) {
             const error = new Error("LLM authentication failed");
             error.isAuthError = true;
@@ -100,7 +105,7 @@ async function executeWithRetry(systemPrompt, userPrompt, env, options, label) {
         } catch (error) {
             lastError = error;
 
-            if (error.isRateLimit || error.isAuthError) {
+            if (error.isRateLimit || error.isAuthError || error.isQuotaExceeded) {
                 throw error;
             }
 
